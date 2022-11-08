@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.distributed
 
@@ -11,6 +13,7 @@ from transformers.models.bloom.parallel_layers import (
     TensorParallelEmbedding,
     TensorParallelRowLinear,
 )
+from transformers.modeling_utils import no_init_weights
 
 from text_generation.models import CausalLM
 from text_generation.models.causal_lm import CausalLMBatch
@@ -19,7 +22,9 @@ from text_generation.utils import (
     initialize_torch_distributed,
     weight_files,
     download_weights,
+    set_default_dtype
 )
+from .prepare_weights import prepare_weights, match_suffix
 
 HAS_BITS_AND_BYTES = True
 try:
@@ -65,6 +70,28 @@ class BLOOMSharded(BLOOM):
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
 
+        # shard state_dict
+        if self.master:
+            # TODO @thomasw21 do some caching
+            from pathlib import Path
+            shard_directory = Path(os.environ["MODEL_BASE_PATH"])
+            shard_state_dict_paths = prepare_weights(
+                model_name,
+                shard_directory / "cache",
+                shard_directory,
+                tp_world_size=self.world_size,
+            )
+            shard_state_dict_paths = [
+                str(path.absolute()) for path in shard_state_dict_paths
+            ]
+        else:
+            shard_state_dict_paths = [None] * self.world_size
+
+        torch.distributed.broadcast_object_list(
+            shard_state_dict_paths, src=0, group=self.process_group
+        )
+        shard_state_dict_path = shard_state_dict_paths[self.rank]
+
         config = AutoConfig.from_pretrained(
             model_name, slow_but_exact=False, tp_parallel=True
         )
@@ -77,28 +104,38 @@ class BLOOMSharded(BLOOM):
         # The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
         torch.backends.cudnn.allow_tf32 = True
 
-        # Only download weights for small models
-        if self.master and model_name == "bigscience/bloom-560m":
-            download_weights(model_name, extension=".safetensors")
+        with set_default_dtype(dtype):
+            with no_init_weights():
+                # we can probably set the device to `meta` here?
+                model = AutoModelForCausalLM.from_config(config).to(dtype)
 
         torch.distributed.barrier(group=self.process_group)
-        filenames = weight_files(model_name, extension=".safetensors")
-        if not filenames:
-            raise ValueError("No safetensors weights found")
+        # filenames = weight_files(model_name, extension=".safetensors")
+        # if not filenames:
+        #     raise ValueError("No safetensors weights found")
+        # print_rank_0(f"Initialized model")
+        state_dict = torch.load(shard_state_dict_path)
+        # TODO @thomasw21: HACK in order to transpose all weight prior
+        for key in state_dict.keys():
+            do_transpose = False
+            if not match_suffix(key, "weight"):
+                continue
 
-        with init_empty_weights():
-            model = AutoModelForCausalLM.from_config(config)
+            for potential_suffix in [
+                "self_attention.query_key_value.weight",
+                "self_attention.dense.weight",
+                "dense_h_to_4h.weight",
+                "dense_4h_to_h.weight",
+            ]:
+                if match_suffix(key, potential_suffix):
+                    do_transpose = True
 
-        torch.distributed.barrier(group=self.process_group)
-        self.load_weights(
-            model,
-            filenames,
-            quantize=quantize,
-            device=device,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-        self.model = model.eval().to(dtype)
+            if do_transpose:
+                state_dict[key] = state_dict[key].transpose(1, 0).contiguous()
+
+        model.load_state_dict(state_dict, strict=False)
+        model.tie_weights()
+        self.model = model.to(dtype).to(device).eval()
         torch.distributed.barrier(group=self.process_group)
         super(CausalLM, self).__init__(
             tokenizer=tokenizer,

@@ -1,6 +1,7 @@
 import concurrent
 import os
 import re
+import contextlib
 import torch
 import torch.distributed
 
@@ -148,6 +149,14 @@ def initialize_torch_distributed():
 
     return torch.distributed.distributed_c10d._get_default_group(), rank, world_size
 
+@contextlib.contextmanager
+def set_default_dtype(dtype):
+    saved_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(saved_dtype)
 
 def weight_hub_files(model_name, extension=".safetensors"):
     """Get the safetensors filenames on the hub"""

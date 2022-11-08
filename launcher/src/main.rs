@@ -299,6 +299,10 @@ fn shard_manager(
             "SAFETENSORS_FAST_GPU".parse().unwrap(),
             "1".to_string().parse().unwrap(),
         ),
+                (
+            "MODEL_BASE_PATH".parse().unwrap(),
+            env::var("MODEL_BASE_PATH").unwrap().parse().unwrap(),
+        ),
     ];
 
     // If the HUGGINGFACE_HUB_CACHE env var is set, pass it to the shard
