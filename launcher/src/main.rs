@@ -299,7 +299,7 @@ fn shard_manager(
             "SAFETENSORS_FAST_GPU".parse().unwrap(),
             "1".to_string().parse().unwrap(),
         ),
-                (
+        (
             "MODEL_BASE_PATH".parse().unwrap(),
             env::var("MODEL_BASE_PATH").unwrap().parse().unwrap(),
         ),

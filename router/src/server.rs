@@ -58,7 +58,11 @@ async fn health(state: Extension<ServerState>) -> Result<(), (StatusCode, Json<E
                 },
             },
         )
-        .await?;
+        .await
+        .map_err(|err| {
+            tracing::error!("Healthcheck error: {}", err.to_string());
+            err
+        })?;
     Ok(())
 }
 
